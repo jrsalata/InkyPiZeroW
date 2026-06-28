@@ -91,7 +91,14 @@ class BasePlugin:
             plugin_css = os.path.join(self.render_dir, css_file)
             css_files.append(plugin_css)
 
-        template_params["style_sheets"] = css_files
+        # inline CSS content so the HTML is self-contained for backend rendering
+        inline_styles = []
+        for css_path in css_files:
+            if os.path.exists(css_path):
+                with open(css_path, 'r') as f:
+                    inline_styles.append(f.read())
+
+        template_params["inline_styles"] = inline_styles
         template_params["width"] = dimensions[0]
         template_params["height"] = dimensions[1]
         template_params["font_faces"] = get_fonts()

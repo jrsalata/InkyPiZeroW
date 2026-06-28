@@ -1,8 +1,10 @@
 <html>
     <head>
-    {% for style in style_sheets %}
-        <link rel="stylesheet" href="{{style}}">
-    {% endfor %}
+    <style>
+        {% for css in inline_styles %}
+        {{ css }}
+        {% endfor %}
+    </style>
     <style>
         {% for font in font_faces %}
         @font-face {
