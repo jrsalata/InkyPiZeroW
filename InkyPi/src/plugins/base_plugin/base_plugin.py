@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import mimetypes
 from utils.app_utils import resolve_path, get_fonts
 from utils.image_utils import take_screenshot_html
 from utils.image_loader import AdaptiveImageLoader
@@ -88,7 +89,37 @@ class BasePlugin:
         template_params['frame_styles'] = FRAME_STYLES
         return template_params
 
-    def render_image(self, dimensions, html_file, css_file=None, template_params={}):
+    def render_image(self, dimensions, html_file, css_file=None, template_params=None):
+        if template_params is None:
+            template_params = {}
+
+        def _resolve_static_candidates(asset_path, static_dirs):
+            if not asset_path:
+                return []
+
+            normalized = asset_path.strip()
+            if normalized.startswith(("http://", "https://", "data:")):
+                return []
+
+            if os.path.isabs(normalized):
+                if os.path.exists(normalized):
+                    return [normalized]
+                try:
+                    rel = os.path.relpath(normalized, STATIC_DIR)
+                    if rel.startswith(".."):
+                        return []
+                    return [os.path.join(d, rel) for d in static_dirs]
+                except ValueError:
+                    return []
+
+            return [os.path.join(d, normalized) for d in static_dirs]
+
+        def _as_data_url(file_path):
+            mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+            with open(file_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+            return f"data:{mime_type};base64,{b64}"
+
         # load the base plugin and current plugin css files
         css_files = [os.path.join(BASE_PLUGIN_RENDER_DIR, "plugin.css")]
         if css_file:
@@ -138,14 +169,7 @@ class BasePlugin:
         # inline any <script src="..."> tags so scripts resolve on the backend
         def _inline_script(match):
             src = match.group(2)
-            if os.path.isabs(src):
-                try:
-                    rel = os.path.relpath(src, STATIC_DIR)
-                    candidates = [os.path.join(d, rel) for d in static_dirs] if not rel.startswith("..") else [src]
-                except ValueError:
-                    candidates = [src]
-            else:
-                candidates = [os.path.join(d, src) for d in static_dirs]
+            candidates = _resolve_static_candidates(src, static_dirs)
             for filepath in candidates:
                 if os.path.exists(filepath):
                     with open(filepath, 'r') as f:
@@ -153,9 +177,60 @@ class BasePlugin:
             logger.warning(f"Script file not found for inlining: {src}")
             return match.group(0)
 
+        # inline any <link rel="stylesheet" href="..."> tags for backend rendering
+        def _inline_stylesheet(match):
+            href = match.group(2)
+            candidates = _resolve_static_candidates(href, static_dirs)
+            for filepath in candidates:
+                if os.path.exists(filepath):
+                    with open(filepath, "r") as f:
+                        return f"<style>\n{f.read()}\n</style>"
+            logger.warning(f"Stylesheet file not found for inlining: {href}")
+            return match.group(0)
+
+        # inline local image sources and local CSS url(...) values as data URLs
+        def _inline_img_src(match):
+            before_src = match.group(1)
+            src = match.group(2)
+            after_src = match.group(3)
+
+            candidates = _resolve_static_candidates(src, static_dirs)
+            for filepath in candidates:
+                if os.path.exists(filepath):
+                    return f'<img {before_src}src="{_as_data_url(filepath)}"{after_src}>'
+            return match.group(0)
+
+        def _inline_css_url(match):
+            raw_path = match.group(1).strip()
+            candidates = _resolve_static_candidates(raw_path, static_dirs)
+            for filepath in candidates:
+                if os.path.exists(filepath):
+                    return f'url("{_as_data_url(filepath)}")'
+            return match.group(0)
+
         rendered_html = re.sub(
             r'<script\s+([^>]*?)src=["\']([^"\']+)["\'][^>]*>\s*</script>',
             _inline_script,
+            rendered_html
+        )
+
+        rendered_html = re.sub(
+            r'<link\s+([^>]*?rel=["\']stylesheet["\'][^>]*?)href=["\']([^"\']+)["\']([^>]*)>',
+            _inline_stylesheet,
+            rendered_html,
+            flags=re.IGNORECASE
+        )
+
+        rendered_html = re.sub(
+            r'<img\s+([^>]*?)src=["\']([^"\']+)["\']([^>]*)>',
+            _inline_img_src,
+            rendered_html,
+            flags=re.IGNORECASE
+        )
+
+        rendered_html = re.sub(
+            r'url\(\s*["\']?([^"\')]+)["\']?\s*\)',
+            _inline_css_url,
             rendered_html
         )
 

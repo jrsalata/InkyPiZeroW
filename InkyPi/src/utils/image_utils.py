@@ -1,15 +1,25 @@
-import requests
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter
-from io import BytesIO
 import os
 import logging
 import hashlib
-import tempfile
-import subprocess
-import shutil
+from io import BytesIO
+
 import requests
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_RENDERER_URL = "http://127.0.0.1:8000"
+
+
+def _get_renderer_url(path):
+    base_url = os.getenv("INKYPI_RENDERER_URL", DEFAULT_RENDERER_URL).rstrip("/")
+    return f"{base_url}{path}"
+
+
+def _open_response_image(response):
+    image = Image.open(BytesIO(response.content))
+    image.load()
+    return image
 
 def get_image(image_url):
     response = requests.get(image_url, timeout=30)
@@ -89,47 +99,80 @@ def compute_image_hash(image):
     img_bytes = image.tobytes()
     return hashlib.sha256(img_bytes).hexdigest()
 
+
 def take_screenshot_html(html_str, dimensions, timeout_ms=None):
-    image = None
     try:
-        # Create a temporary HTML file
-        with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as html_file:
-            html_file.write(html_str.encode("utf-8"))
-            html_file_path = html_file.name
+        width, height = dimensions
+        upload_url = _get_renderer_url(f"/upload/{width}/{height}")
+        timeout_seconds = (timeout_ms or 30000) / 1000
 
-        image = take_screenshot(html_file_path, dimensions, timeout_ms)
+        files = {
+            "file": ("render.html", html_str.encode("utf-8"), "text/html")
+        }
+        response = requests.post(upload_url, files=files, timeout=timeout_seconds)
 
-        # Remove html file
-        os.remove(html_file_path)
+        if response.status_code != 200:
+            logger.error(f"HTML render upload failed: status_code={response.status_code}")
+            return None
+
+        return _open_response_image(response)
 
     except Exception as e:
-        logger.error(f"Failed to take screenshot: {str(e)}")
+        logger.error(f"Failed to render HTML screenshot: {str(e)}")
 
-    return image
+    return None
+
+
+def take_screenshot_url(url, dimensions, timeout_ms=None):
+    try:
+        width, height = dimensions
+        screenshot_url = _get_renderer_url(f"/screenshot/{width}/{height}")
+        timeout_seconds = (timeout_ms or 30000) / 1000
+
+        response = requests.post(
+            screenshot_url,
+            json={"url": url},
+            timeout=timeout_seconds
+        )
+
+        if response.status_code != 200:
+            logger.error(f"URL screenshot failed: status_code={response.status_code}")
+            return None
+
+        return _open_response_image(response)
+
+    except Exception as e:
+        logger.error(f"Failed to take URL screenshot: {str(e)}")
+
+    return None
+
+
+def take_screenshot_file(target, dimensions, timeout_ms=None):
+    try:
+        width, height = dimensions
+        upload_url = _get_renderer_url(f"/upload/{width}/{height}")
+        timeout_seconds = (timeout_ms or 30000) / 1000
+
+        with open(target, "rb") as f:
+            files = {"file": (os.path.basename(target), f, "text/html")}
+            response = requests.post(upload_url, files=files, timeout=timeout_seconds)
+
+        if response.status_code != 200:
+            logger.error(f"File screenshot upload failed: status_code={response.status_code}")
+            return None
+
+        return _open_response_image(response)
+
+    except Exception as e:
+        logger.error(f"Failed to render file screenshot: {str(e)}")
+
+    return None
 
 
 def take_screenshot(target, dimensions, timeout_ms=None):
-    image = None
-    try:
-        width, height = dimensions
-
-        # TODO: Move this to a configurable var
-        url = f"https://example.com/upload/{width}/{height}"
-
-        with open(target, "rb") as f:
-            files = {"file": f}
-            response = requests.post(url, files=files, timeout=(timeout_ms or 30000) / 1000)
-
-        if response.status_code != 200:
-            logger.error(f"Upload failed: status_code={response.status_code}")
-            return None
-
-        image = Image.open(BytesIO(response.content))
-
-    except Exception as e:
-        logger.error(f"Failed to take screenshot: {str(e)}")
-
-    return image
+    if os.path.isfile(target):
+        return take_screenshot_file(target, dimensions, timeout_ms)
+    return take_screenshot_url(target, dimensions, timeout_ms)
 
 def pad_image_blur(img: Image, dimensions: tuple[int, int]) -> Image:
     bkg = ImageOps.fit(img, dimensions)
