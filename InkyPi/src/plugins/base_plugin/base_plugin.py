@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = resolve_path("static")
 PLUGINS_DIR = resolve_path("plugins")
+
+# Deployment-time static directories where JS/font files may be installed
+FALLBACK_STATIC_DIRS = ["/usr/local/inkypi/src/static"]
 BASE_PLUGIN_DIR =  os.path.join(PLUGINS_DIR, "base_plugin")
 BASE_PLUGIN_RENDER_DIR = os.path.join(BASE_PLUGIN_DIR, "render")
 
@@ -104,9 +107,21 @@ class BasePlugin:
         template_params["height"] = dimensions[1]
 
         # inline fonts as base64 data URLs so they resolve on the backend
+        static_dirs = [STATIC_DIR] + FALLBACK_STATIC_DIRS
         font_faces = get_fonts()
         for font in font_faces:
             font_path = font["url"]
+            if not os.path.exists(font_path):
+                try:
+                    rel = os.path.relpath(font_path, STATIC_DIR)
+                    if not rel.startswith(".."):
+                        for d in static_dirs:
+                            alt = os.path.join(d, rel)
+                            if os.path.exists(alt):
+                                font_path = alt
+                                break
+                except ValueError:
+                    pass
             if os.path.exists(font_path):
                 with open(font_path, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode("utf-8")
@@ -123,11 +138,19 @@ class BasePlugin:
         # inline any <script src="..."> tags so scripts resolve on the backend
         def _inline_script(match):
             src = match.group(2)
-            filepath = src if os.path.isabs(src) else os.path.join(STATIC_DIR, src)
-            if os.path.exists(filepath):
-                with open(filepath, 'r') as f:
-                    return f"<script>\n{f.read()}\n</script>"
-            logger.warning(f"Script file not found for inlining: {filepath}")
+            if os.path.isabs(src):
+                try:
+                    rel = os.path.relpath(src, STATIC_DIR)
+                    candidates = [os.path.join(d, rel) for d in static_dirs] if not rel.startswith("..") else [src]
+                except ValueError:
+                    candidates = [src]
+            else:
+                candidates = [os.path.join(d, src) for d in static_dirs]
+            for filepath in candidates:
+                if os.path.exists(filepath):
+                    with open(filepath, 'r') as f:
+                        return f"<script>\n{f.read()}\n</script>"
+            logger.warning(f"Script file not found for inlining: {src}")
             return match.group(0)
 
         rendered_html = re.sub(
