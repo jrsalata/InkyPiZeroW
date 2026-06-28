@@ -7,6 +7,7 @@ import hashlib
 import tempfile
 import subprocess
 import shutil
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -106,66 +107,24 @@ def take_screenshot_html(html_str, dimensions, timeout_ms=None):
 
     return image
 
-def _find_chromium_binary():
-    """Find the first available Chromium-based binary in system PATH."""
-    candidates = ["chromium-headless-shell", "chromium", "chrome"]
-    for candidate in candidates:
-        path = shutil.which(candidate)
-        if path:
-            logger.debug(f"Found browser binary: {candidate} at {path}")
-            return candidate
-    return None
-
 
 def take_screenshot(target, dimensions, timeout_ms=None):
     image = None
     try:
-        # Find available browser binary
-        browser = _find_chromium_binary()
-        if not browser:
-            logger.error("No Chromium-based browser found. Install chromium, chromium-headless-shell, or chrome.")
+        width, height = dimensions
+
+        # TODO: Move this to a configurable var
+        url = f"https://example.com/upload/{width}/{height}"
+
+        with open(target, "rb") as f:
+            files = {"file": f}
+            response = requests.post(url, files=files, timeout=(timeout_ms or 30000) / 1000)
+
+        if response.status_code != 200:
+            logger.error(f"Upload failed: status_code={response.status_code}")
             return None
 
-        # Create a temporary output file for the screenshot
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as img_file:
-            img_file_path = img_file.name
-
-        command = [
-            browser,
-            target,
-            "--headless",
-            f"--screenshot={img_file_path}",
-            f"--window-size={dimensions[0]},{dimensions[1]}",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--use-gl=swiftshader",
-            "--hide-scrollbars",
-            "--in-process-gpu",
-            "--js-flags=--jitless",
-            "--disable-zero-copy",
-            "--disable-gpu-memory-buffer-compositor-resources",
-            "--disable-extensions",
-            "--disable-plugins",
-            "--mute-audio",
-            "--renderer-process-limit=1",
-            "--no-zygote",
-            "--no-sandbox"
-        ]
-        if timeout_ms:
-            command.append(f"--timeout={timeout_ms}")
-        result = subprocess.run(command, capture_output=True, check=False)
-
-        # Check if the process failed or the output file is missing
-        if result.returncode != 0 or not os.path.exists(img_file_path):
-            logger.error(f"Failed to take screenshot (return code: {result.returncode})")
-            return None
-
-        # Load the image using PIL
-        with Image.open(img_file_path) as img:
-            image = img.copy()
-
-        # Remove image files
-        os.remove(img_file_path)
+        image = Image.open(BytesIO(response.content))
 
     except Exception as e:
         logger.error(f"Failed to take screenshot: {str(e)}")
