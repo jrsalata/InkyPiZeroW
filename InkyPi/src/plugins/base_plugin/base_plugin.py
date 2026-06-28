@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from utils.app_utils import resolve_path, get_fonts
 from utils.image_utils import take_screenshot_html
 from utils.image_loader import AdaptiveImageLoader
@@ -101,11 +102,38 @@ class BasePlugin:
         template_params["inline_styles"] = inline_styles
         template_params["width"] = dimensions[0]
         template_params["height"] = dimensions[1]
-        template_params["font_faces"] = get_fonts()
+
+        # inline fonts as base64 data URLs so they resolve on the backend
+        font_faces = get_fonts()
+        for font in font_faces:
+            font_path = font["url"]
+            if os.path.exists(font_path):
+                with open(font_path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                    font["url"] = f"data:font/ttf;base64,{b64}"
+            else:
+                logger.warning(f"Font file not found: {font_path}")
+        template_params["font_faces"] = font_faces
         template_params["static_dir"] = STATIC_DIR
 
         # load and render the given html template
         template = self.env.get_template(html_file)
         rendered_html = template.render(template_params)
+
+        # inline any <script src="..."> tags so scripts resolve on the backend
+        def _inline_script(match):
+            src = match.group(2)
+            filepath = src if os.path.isabs(src) else os.path.join(STATIC_DIR, src)
+            if os.path.exists(filepath):
+                with open(filepath, 'r') as f:
+                    return f"<script>\n{f.read()}\n</script>"
+            logger.warning(f"Script file not found for inlining: {filepath}")
+            return match.group(0)
+
+        rendered_html = re.sub(
+            r'<script\s+([^>]*?)src=["\']([^"\']+)["\'][^>]*>\s*</script>',
+            _inline_script,
+            rendered_html
+        )
 
         return take_screenshot_html(rendered_html, dimensions)
